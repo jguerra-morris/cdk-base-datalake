@@ -1,5 +1,6 @@
 from aws_cdk import (
     Stack,
+    CfnOutput,
     aws_ec2 as ec2
 )
 from constructs import Construct
@@ -77,7 +78,7 @@ class NetworkingStack(Stack):
         
         security_group.add_ingress_rule(
             peer=ec2.Peer.ipv4("10.100.3.158/32"),
-            connection=ec2.Port.tcp(5439),
+            connection=ec2.Port.all_traffic(),  #5439
             description="Connection to cluster from anywhere"
         )
 
@@ -98,7 +99,7 @@ class NetworkingStack(Stack):
             )
 
             # Create an ec2 instance with role and in private with egress subnets
-            ec2.Instance(
+            instaceTest = ec2.Instance(
                 self,
                 create_name(self, "instance", "test"),
                 vpc=self.vpc,
@@ -113,4 +114,10 @@ class NetworkingStack(Stack):
                 ),
             )
 
+            # Create a Cloudformation output for the instanceId
+            CfnOutput(
+                self,
+                create_name(self, "output", "ssm-connection"),
+                value="aws ssm start-session --target "+instaceTest.instance_id+"  --profile marina --region us-east-1",
+            )
 
