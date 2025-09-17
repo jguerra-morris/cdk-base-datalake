@@ -4,7 +4,6 @@ from aws_cdk import (
     Stack,
     aws_glue as glue,
     aws_s3 as s3,
-    aws_s3_deployment as s3deploy,
     aws_iam as iam,
 )
 from constructs import Construct
@@ -84,16 +83,6 @@ class IngestionStack(Stack):
         glue_role.add_to_policy(s3_read_write_policy)
 
 
-
-        # Deploy glue scripts to s3 bucket
-        s3deploy.BucketDeployment(
-            self,
-            create_name(self, "deploy", "glue-scripts"),
-            sources=[s3deploy.Source.asset("./glue")],
-            destination_bucket=scripts_bucket,
-            destination_key_prefix="glue",
-        )
-
         # Create an aws glue job for python
         glue_job = glue.CfnJob(
             self,
@@ -105,8 +94,9 @@ class IngestionStack(Stack):
                 script_location=f"s3://{scripts_bucket.bucket_name}/glue/ingestion.py",
             ),
             default_arguments={
-                "--bucket": scripts_bucket.bucket_name,
-                "--key": "glue/ingestion.py",
+                "--TARGET_BUCKET": raw_bucket.bucket_name,
+                "--CONNECTION_NAME": "marina-us-east-1-connection-dev-sap-hana",
+                "--KEY": "glue/ingestion.py",
             },
             glue_version="5.0",
             max_capacity=1.0,

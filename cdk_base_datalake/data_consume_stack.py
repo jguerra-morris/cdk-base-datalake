@@ -7,6 +7,9 @@ from aws_cdk import (
     aws_iam as iam,
     aws_ec2 as ec2,
     aws_secretsmanager as secretsmanager,
+    aws_glue as glue,
+    aws_lakeformation as lakeformation,
+
 )
 from constructs import Construct
 
@@ -18,19 +21,40 @@ class DataConsumeStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, vpc: ec2.Vpc, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-
-        # Cluster Password Secret
-        cluster_masteruser_secret = secretsmanager.Secret(
-            self,
-            create_name(self, "secret", "redshift"),
-            description="Redshift Cluster Secret",
-            secret_name=create_name(self, "secret", "redshift"),
-            generate_secret_string=secretsmanager.SecretStringGenerator(
-                exclude_punctuation=True,
-                password_length=10,
-            ),
-            removal_policy=RemovalPolicy.DESTROY,
+        secret_read_policy = iam.PolicyStatement(
+            sid="AllowSecretRead",
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret"
+            ],
+            resources=[
+                "arn:aws:secretsmanager:"+self.region+":"+self.account+":secret:*"
+            ]
         )
+        vpc_networking_policy = iam.PolicyStatement(
+            sid="AllowVpcNetworking",
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "ec2:CreateNetworkInterface",
+                "ec2:DeleteNetworkInterface",
+                "ec2:DescribeNetworkInterfaces",
+                "ec2:DescribeVpcs",
+                "ec2:DescribeSubnets",
+                "ec2:DescribeSecurityGroups"
+            ],
+            resources=["*"]
+        )
+        
+
+        glue_connection_role = iam.Role(
+            self,
+            create_name(self, "role", "glue-redshift-connection"),
+            assumed_by=iam.ServicePrincipal("glue.amazonaws.com"),
+            role_name=create_name(self, "role", "glue-redshift-connection"),
+        )
+        glue_connection_role.add_to_policy(secret_read_policy)
+        glue_connection_role.add_to_policy(vpc_networking_policy)
 
         # IAM Role for Cluster
         cluster_iam_role = iam.Role(
@@ -45,9 +69,6 @@ class DataConsumeStack(Stack):
                 )
             ],
         )
-
-        # Grant read access to secret for IAM Role
-        cluster_masteruser_secret.grant_read(cluster_iam_role)
 
         # Redshift Subnet Group
         cluster_subnet_group = redshift.CfnClusterSubnetGroup(
@@ -81,7 +102,18 @@ class DataConsumeStack(Stack):
         )
 
 
-        redshift_enabled = False
+        # ---------------------- CORE GLUE METADATA STORE ----------------------
+        # Create Glue Database
+        glue_database = glue.CfnDatabase(
+            self,
+            create_name(self, "glue", "database"),
+            catalog_id=self.account,
+            database_input={
+                "name": create_name(self, "glue", f"database-{self.account}"),
+            },
+        )
+
+        redshift_enabled = True
         if redshift_enabled:  
             # Redshift Cluster
             cluster = redshift.CfnCluster(
@@ -91,7 +123,7 @@ class DataConsumeStack(Stack):
                 cluster_identifier=create_name(self, "redshift", "cluster"),
                 master_username="awsuser",
                 cluster_type="multi-node",
-                master_user_password=cluster_masteruser_secret.secret_value.unsafe_unwrap(),
+                manage_master_password=True,
                 iam_roles=[cluster_iam_role.role_arn],
                 node_type="ra3.large",
                 number_of_nodes=2,
@@ -99,3 +131,4 @@ class DataConsumeStack(Stack):
                 vpc_security_group_ids=[security_group.security_group_id],
                 publicly_accessible=False
             )        
+    

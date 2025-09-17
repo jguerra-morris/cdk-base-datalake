@@ -3,6 +3,7 @@ from aws_cdk import (
     RemovalPolicy,
     Stack,
     aws_s3 as s3,
+    aws_s3_deployment as s3deploy,
     aws_iam as iam,
 )
 from constructs import Construct
@@ -67,6 +68,14 @@ class DataStorageLayerStack(Stack):
             auto_delete_objects=True,
         )
 
+        # Deploy glue scripts to s3 bucket
+        s3deploy.BucketDeployment(
+            self,
+            create_name(self, "deploy", "glue-scripts"),
+            sources=[s3deploy.Source.asset("./glue")],
+            destination_bucket=self.scripts_bucket,
+            destination_key_prefix="glue",
+        )
 
 
 

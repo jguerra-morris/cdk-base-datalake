@@ -7,6 +7,7 @@ from cdk_base_datalake.networking_stack import NetworkingStack
 from cdk_base_datalake.data_consume_stack import DataConsumeStack
 from cdk_base_datalake.data_storage_layer import DataStorageLayerStack
 from cdk_base_datalake.ingestion_stack import IngestionStack
+from cdk_base_datalake.stage_a_stack import StageAStack
 
 app = cdk.App()
 
@@ -29,5 +30,12 @@ network_stack = NetworkingStack(app, create_name(app, "stack", "networking"))
 data_consume_stack = DataConsumeStack(app, create_name(app, "stack", "data-consume"), network_stack.vpc)
 data_storage_stack = DataStorageLayerStack(app, create_name(app, "stack", "data-storage"))
 IngestionStack(app, create_name(app, "stack", "ingestion"), data_storage_stack.scripts_bucket, data_storage_stack.raw_bucket)
+StageAStack(
+    app,
+    create_name(app, "stack", "stage-a"),
+    data_storage_stack.scripts_bucket,
+    data_storage_stack.raw_bucket,
+    data_storage_stack.master_bucket
+    )
 
 app.synth()
