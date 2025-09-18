@@ -8,6 +8,7 @@ from cdk_base_datalake.data_consume_stack import DataConsumeStack
 from cdk_base_datalake.data_storage_layer import DataStorageLayerStack
 from cdk_base_datalake.ingestion_stack import IngestionStack
 from cdk_base_datalake.stage_a_stack import StageAStack
+from cdk_base_datalake.stage_b_stack import StageBStack
 
 app = cdk.App()
 
@@ -36,6 +37,13 @@ StageAStack(
     data_storage_stack.scripts_bucket,
     data_storage_stack.raw_bucket,
     data_storage_stack.master_bucket
+    )
+StageBStack(
+    app,
+    create_name(app, "stack", "stage-b"),
+    data_storage_stack.scripts_bucket,
+    data_storage_stack.master_bucket,
+    data_storage_stack.analytics_bucket
     )
 
 app.synth()

@@ -1,11 +1,16 @@
 import sys
 import logging
+import boto3
+import json
+from datetime import datetime
+
 from awsglue.transforms import *
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsgluedq.transforms import EvaluateDataQuality
+from awsglue.dynamicframe import DynamicFrame
 
 # ----------------------------
 # Configure logging
@@ -23,18 +28,17 @@ logging.basicConfig(
 # ----------------------------
 args = getResolvedOptions(
     sys.argv,
-    ['JOB_NAME', 'TARGET_BUCKET', 'SOURCE_BUCKET', 'CONNECTION_NAME']
+    ['JOB_NAME', 'TARGET_BUCKET', 'SOURCE_BUCKET', 'SM_STAGE_B_ARN']
 )
 
 job_name = args['JOB_NAME']
 source_bucket = args['SOURCE_BUCKET']
 target_bucket = args['TARGET_BUCKET']
-connection_name = args['CONNECTION_NAME']
+state_machine_arn = args['SM_STAGE_B_ARN']
 
 logger.info(f"Starting Glue job: {job_name}")
 logger.info(f"Source S3 bucket: {source_bucket}")
 logger.info(f"Target S3 bucket: {target_bucket}")
-logger.info(f"Redshift connection: {connection_name}")
 
 # ----------------------------
 # Initialize contexts
@@ -108,37 +112,24 @@ s3_target_node = glueContext.write_dynamic_frame.from_options(
 )
 logger.info(f"Data successfully written to {output_path}")
 
-# ----------------------------
-# Load to Amazon Redshift
-# ----------------------------
-logger.info("Writing data to Redshift table: public.test")
-redshift_node = glueContext.write_dynamic_frame.from_options(
-    frame=s3_source_node, 
-    connection_type="redshift", 
-    connection_options={
-        "redshiftTmpDir": f"s3://aws-glue-assets-679835924785-us-east-1/temporary/", 
-        "useConnectionProperties": "true", 
-        "dbtable": "public.test", 
-        "connectionName": connection_name, 
-        "preactions": """
-            DROP TABLE IF EXISTS public.test; 
-            CREATE TABLE IF NOT EXISTS public.test (
-                Empresa VARCHAR, Asiento INTEGER, Linea INTEGER, Fecha TIMESTAMP, 
-                AcctCode VARCHAR, CC1 VARCHAR, CC2 VARCHAR, CC3 VARCHAR, CC4 VARCHAR, CC5 VARCHAR, 
-                Debe_$ DECIMAL, Haber_$ DECIMAL, Debe_UF DECIMAL, Haber_UF DECIMAL, 
-                Debe_USD DECIMAL, Haber_USD DECIMAL, Debe_EUR DECIMAL, Haber_EUR DECIMAL, 
-                Ref1_Cab VARCHAR, Ref2_Cab VARCHAR, Ref3_Cab VARCHAR, 
-                Ref1_Line VARCHAR, Ref2_Line VARCHAR, Ref3_Line VARCHAR, 
-                Glosa VARCHAR, Glosa_detalle VARCHAR
-            );
-        """
-    }, 
-    transformation_ctx="redshift_node"
-)
-logger.info("Data successfully written to Redshift table: public.test")
 
 # ----------------------------
-# Commit job
+# Trigger Stage B Step Function
 # ----------------------------
-job.commit()
-logger.info(f"Glue job {job_name} completed successfully.")
+
+stepfunctions_client = boto3.client('stepfunctions')
+
+payload = {
+    "key": "SBO_CCP.POC_DIARIO"
+}
+
+execution_name = f"{job_name}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+
+logger.info(f"Starting Step Function execution: {state_machine_arn} with payload {payload}")
+response = stepfunctions_client.start_execution(
+    stateMachineArn=state_machine_arn,
+    name=execution_name,
+    input=json.dumps(payload)
+)
+logger.info(f"Step Function started. Execution ARN: {response['executionArn']}")
+

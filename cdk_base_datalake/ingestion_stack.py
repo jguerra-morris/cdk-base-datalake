@@ -56,6 +56,14 @@ class IngestionStack(Stack):
             ],
             resources=["*"]
         )
+        step_function_policy = iam.PolicyStatement(
+            sid="AllowSFAllow",
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "states:StartExecution"
+            ],
+            resources=["*"]
+        )
         
 
         glue_connection_role = iam.Role(
@@ -81,6 +89,7 @@ class IngestionStack(Stack):
         )
         glue_role.add_to_policy(secret_read_policy)
         glue_role.add_to_policy(s3_read_write_policy)
+        glue_role.add_to_policy(step_function_policy)
 
 
         # Create an aws glue job for python
@@ -96,7 +105,7 @@ class IngestionStack(Stack):
             default_arguments={
                 "--TARGET_BUCKET": raw_bucket.bucket_name,
                 "--CONNECTION_NAME": "marina-us-east-1-connection-dev-sap-hana",
-                "--KEY": "glue/ingestion.py",
+                "--SM_STAGE_A_ARN": "arn:aws:states:"+self.region+":"+self.account+":stateMachine:"+create_name(self, "state-machine", "data-stage-a")
             },
             glue_version="5.0",
             max_capacity=1.0,

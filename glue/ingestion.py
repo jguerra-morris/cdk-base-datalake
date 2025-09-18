@@ -6,6 +6,9 @@ from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsgluedq.transforms import EvaluateDataQuality
+import boto3
+import json
+from datetime import datetime
 
 # ----------------------------
 # Configure logging
@@ -21,10 +24,11 @@ logging.basicConfig(
 # ----------------------------
 # Parse Glue job arguments
 # ----------------------------
-args = getResolvedOptions(sys.argv, ['JOB_NAME', 'TARGET_BUCKET', 'CONNECTION_NAME'])
+args = getResolvedOptions(sys.argv, ['JOB_NAME', 'TARGET_BUCKET', 'CONNECTION_NAME', 'SM_STAGE_A_ARN'])
 job_name = args['JOB_NAME']
 target_bucket = args['TARGET_BUCKET']
 connection_name = args['CONNECTION_NAME']
+state_machine_arn = args['SM_STAGE_A_ARN']
 
 logger.info(f"Starting Glue job: {job_name}")
 logger.info(f"Target S3 bucket: {target_bucket}")
@@ -99,6 +103,28 @@ s3Node = glueContext.write_dynamic_frame.from_options(
     transformation_ctx="s3Node"
 )
 logger.info(f"Data successfully written to {output_path}")
+
+# ----------------------------
+# Trigger Dtage A Step Function
+# ----------------------------
+
+stepfunctions_client = boto3.client('stepfunctions')
+
+payload = {
+    "key": "SBO_CCP.POC_DIARIO"
+}
+
+execution_name = f"{job_name}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+
+logger.info(f"Starting Step Function execution: {state_machine_arn} with payload {payload}")
+response = stepfunctions_client.start_execution(
+    stateMachineArn=state_machine_arn,
+    name=execution_name,
+    input=json.dumps(payload)
+)
+logger.info(f"Step Function started. Execution ARN: {response['executionArn']}")
+
+
 
 # ----------------------------
 # Commit job

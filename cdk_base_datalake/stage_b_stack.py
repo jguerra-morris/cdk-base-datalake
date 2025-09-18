@@ -19,15 +19,15 @@ from constructs import Construct
 
 from utils import create_name
 
-class StageAStack(Stack):
+class StageBStack(Stack):
 
     def __init__(
             self,
             scope: Construct,
             construct_id: str,
             scripts_bucket: s3.Bucket,
-            raw_bucket: s3.Bucket,
             master_bucket: s3.Bucket,
+            analytics_bucket: s3.Bucket,
             **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
         
@@ -35,11 +35,11 @@ class StageAStack(Stack):
         s3_read_write_policy = iam.PolicyStatement(
                 actions=["s3:PutObject", "s3:GetObject"],
                 resources=[
-                    raw_bucket.arn_for_objects("*"),
-                    scripts_bucket.arn_for_objects("*"),
                     master_bucket.arn_for_objects("*"),
+                    scripts_bucket.arn_for_objects("*"),
+                    analytics_bucket.arn_for_objects("*"),
+                    analytics_bucket.bucket_arn,
                     master_bucket.bucket_arn,
-                    raw_bucket.bucket_arn,
                     scripts_bucket.bucket_arn
                 ],
             )
@@ -54,21 +54,13 @@ class StageAStack(Stack):
                 "arn:aws:secretsmanager:"+self.region+":"+self.account+":secret:*"
             ]
         )
-        step_function_policy = iam.PolicyStatement(
-            sid="AllowSFAllow",
-            effect=iam.Effect.ALLOW,
-            actions=[
-                "states:StartExecution"
-            ],
-            resources=["*"]
-        )
         
 
         glue_role = iam.Role(
             self,
-            create_name(self, "role", "stage-a-glue"),
+            create_name(self, "role", "stage-b-glue"),
             assumed_by=iam.ServicePrincipal("glue.amazonaws.com"),
-            role_name=create_name(self, "role", "stage-a-glue"),
+            role_name=create_name(self, "role", "stage-b-glue"),
         )
         glue_role.add_managed_policy(
             iam.ManagedPolicy.from_aws_managed_policy_name(
@@ -77,34 +69,39 @@ class StageAStack(Stack):
         )
         glue_role.add_to_policy(secret_read_policy)
         glue_role.add_to_policy(s3_read_write_policy)
-        glue_role.add_to_policy(step_function_policy)
 
 
         # Create an aws glue job for python
         glue_job = glue.CfnJob(
             self,
-            create_name(self, "job", "stage-a"),
-            name=create_name(self, "job", "stage-a"),
+            create_name(self, "job", "stage-b"),
+            name=create_name(self, "job", "stage-b"),
             role=glue_role.role_arn,
             command=glue.CfnJob.JobCommandProperty(
                 name="glueetl",
-                script_location=f"s3://{scripts_bucket.bucket_name}/glue/stage_a.py",
+                script_location=f"s3://{scripts_bucket.bucket_name}/glue/stage_b.py",
             ),
             default_arguments={
-                "--SOURCE_BUCKET": raw_bucket.bucket_name,
-                "--TARGET_BUCKET": master_bucket.bucket_name,
-                "--SM_STAGE_B_ARN": "arn:aws:states:"+self.region+":"+self.account+":stateMachine:"+create_name(self, "state-machine", "data-stage-b")
+                "--SOURCE_BUCKET": master_bucket.bucket_name,
+                "--TARGET_BUCKET": analytics_bucket.bucket_name,
+                "--CONNECTION_NAME": "marina-us-east-1-connection-dev-redshift-2",
             },
             glue_version="5.0",
             max_capacity=1.0,
             execution_property=glue.CfnJob.ExecutionPropertyProperty(
                 max_concurrent_runs=1
-            )
+            ),
+            connections=glue.CfnJob.ConnectionsListProperty(
+                    connections=[
+                        "marina-us-east-1-connection-dev-redshift-2"
+                        #create_name(self, "connection", "sap-hana")
+                    ]
+                )
         )
 
         glue_task = tasks.GlueStartJobRun(
             self,
-            create_name(self, "task", "stage-a"),
+            create_name(self, "task", "stage-b"),
             glue_job_name=glue_job.name,
             integration_pattern=sfn.IntegrationPattern.RUN_JOB,
             arguments=sfn.TaskInput.from_object({
@@ -117,9 +114,9 @@ class StageAStack(Stack):
 
         topic = sns.Topic(
             self,
-            create_name(self, "topic", "stage-a"),
-            display_name="Topico de notificacion de funcionalidad del Stage A.",
-            topic_name=create_name(self, "topic", "stage-a"),
+            create_name(self, "topic", "stage-b"),
+            display_name="Topico de notificacion de funcionalidad del Stage B.",
+            topic_name=create_name(self, "topic", "stage-b"),
         )
 
         job_failed_task = tasks.SnsPublish(
@@ -142,8 +139,8 @@ class StageAStack(Stack):
 
         sf_machine = sfn.StateMachine(
             self,
-            create_name(self, "state-machine", "data-stage-a"),
-            state_machine_name=create_name(self, "state-machine", "data-stage-a"),
+            create_name(self, "state-machine", "data-stage-b"),
+            state_machine_name=create_name(self, "state-machine", "data-stage-b"),
             definition_body=sfn.DefinitionBody.from_chainable(step_function_definition),
             timeout=Duration.minutes(10),
         )
