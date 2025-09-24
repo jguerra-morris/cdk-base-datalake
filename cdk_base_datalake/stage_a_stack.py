@@ -33,7 +33,7 @@ class StageAStack(Stack):
         
 
         s3_read_write_policy = iam.PolicyStatement(
-                actions=["s3:PutObject", "s3:GetObject"],
+                actions=["s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:ListBucket"],
                 resources=[
                     raw_bucket.arn_for_objects("*"),
                     scripts_bucket.arn_for_objects("*"),
@@ -97,8 +97,9 @@ class StageAStack(Stack):
             },
             glue_version="5.0",
             max_capacity=1.0,
+            timeout=10,
             execution_property=glue.CfnJob.ExecutionPropertyProperty(
-                max_concurrent_runs=1
+                max_concurrent_runs=3
             )
         )
 
