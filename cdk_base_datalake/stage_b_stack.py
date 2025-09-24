@@ -33,7 +33,7 @@ class StageBStack(Stack):
         
 
         s3_read_write_policy = iam.PolicyStatement(
-                actions=["s3:PutObject", "s3:GetObject"],
+                actions=["s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:ListBucket"],
                 resources=[
                     master_bucket.arn_for_objects("*"),
                     scripts_bucket.arn_for_objects("*"),
@@ -87,9 +87,10 @@ class StageBStack(Stack):
                 "--CONNECTION_NAME": "marina-us-east-1-connection-dev-redshift-2",
             },
             glue_version="5.0",
+            timeout=10,
             max_capacity=1.0,
             execution_property=glue.CfnJob.ExecutionPropertyProperty(
-                max_concurrent_runs=1
+                max_concurrent_runs=3
             ),
             connections=glue.CfnJob.ConnectionsListProperty(
                     connections=[
