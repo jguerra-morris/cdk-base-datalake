@@ -30,6 +30,21 @@ class DataStorageLayerStack(Stack):
         )
 
         # Create an aws s3 bucket
+        self.ingestion_bucket = s3.Bucket(
+            self,
+            create_name(self, "bucket", "datalake-ingestion"),
+            bucket_name=create_name(self, "bucket", f"datalake-ingestion-{self.account}"),
+            versioned=True,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            enforce_ssl=True,
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
+            event_bridge_enabled=True
+        )        
+        
+
+        # Create an aws s3 bucket
         self.raw_bucket = s3.Bucket(
             self,
             create_name(self, "bucket", "datalake-raw"),
@@ -55,18 +70,6 @@ class DataStorageLayerStack(Stack):
             auto_delete_objects=True,
         )
 
-
-        self.analytics_bucket = s3.Bucket(
-            self,
-            create_name(self, "bucket", "datalake-analytics"),
-            bucket_name=create_name(self, "bucket", f"datalake-analytics-{self.account}"),
-            versioned=True,
-            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
-            encryption=s3.BucketEncryption.S3_MANAGED,
-            enforce_ssl=True,
-            removal_policy=RemovalPolicy.DESTROY,
-            auto_delete_objects=True,
-        )
 
         # Deploy glue scripts to s3 bucket
         s3deploy.BucketDeployment(

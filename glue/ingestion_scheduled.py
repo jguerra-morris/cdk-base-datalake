@@ -1,7 +1,6 @@
 import sys
 import logging
-import json
-from datetime import datetime, date
+from datetime import datetime
 
 import boto3
 from awsglue.transforms import *
@@ -10,6 +9,7 @@ from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsgluedq.transforms import EvaluateDataQuality
+
 
 # ============================================================
 # Configure Logging
@@ -22,22 +22,25 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
+
 # ============================================================
 # Parse Glue Job Arguments
 # ============================================================
 args = getResolvedOptions(
     sys.argv,
-    ["JOB_NAME", "TARGET_BUCKET", "CONNECTION_NAME", "SM_STAGE_A_ARN"]
+    ["JOB_NAME", "TARGET_BUCKET", "CONNECTION_NAME", "DB_TABLE"]
 )
 
 job_name = args["JOB_NAME"]
 target_bucket = args["TARGET_BUCKET"]
 connection_name = args["CONNECTION_NAME"]
-state_machine_arn = args["SM_STAGE_A_ARN"]
+db_table = args["DB_TABLE"]
 
 logger.info(f"Starting Glue job: {job_name}")
 logger.info(f"Target S3 bucket: {target_bucket}")
-logger.info(f"SAP HANA connection: {connection_name}")
+logger.info(f"MySQL connection: {connection_name}")
+logger.info(f"Source table: {db_table}")
+
 
 # ============================================================
 # Initialize Glue Context
@@ -49,6 +52,7 @@ spark = glue_context.spark_session
 job = Job(glue_context)
 job.init(job_name, args)
 
+
 # ============================================================
 # Constants & Configurations
 # ============================================================
@@ -59,20 +63,8 @@ DEFAULT_DATA_QUALITY_RULESET = """
 """
 logger.info("Default Data Quality ruleset defined.")
 
-today = date.today()
-year, month, day = today.strftime("%Y"), today.strftime("%m"), today.strftime("%d")
-
-tables = [
-    "SBO_CCP.POC_DIARIO",
-    "SBO_CCP.POC_PRESUPUESTO",
-    "SBO_CCP.POC_ESTRUCTURA_EERR",
-    "SBO_INMMMA_V1.POC_DIARIO",
-    "SBO_INMMMA_V1.POC_PRESUPUESTO",
-    "SBO_INMMMA_V1.POC_ESTRUCTURA_EERR"
-]
-
 s3 = boto3.resource("s3")
-stepfunctions_client = boto3.client("stepfunctions")
+
 
 # ============================================================
 # Helper Functions
@@ -82,7 +74,7 @@ def clear_s3_prefix(bucket: str, prefix: str) -> None:
     """
     Deletes all objects under the given S3 prefix.
     """
-    prefix = prefix.rstrip("/")  # normalize prefix
+    prefix = prefix.rstrip("/")  # normalize
     bucket_obj = s3.Bucket(bucket)
 
     objects_to_delete = list(bucket_obj.objects.filter(Prefix=prefix))
@@ -92,28 +84,32 @@ def clear_s3_prefix(bucket: str, prefix: str) -> None:
 
     logger.info(f"Found {len(objects_to_delete)} objects to delete under s3://{bucket}/{prefix}")
 
-    for i in range(0, len(objects_to_delete), 1000):  # S3 DeleteObjects API limit
+    for i in range(0, len(objects_to_delete), 1000):  # API limit
         batch = objects_to_delete[i:i+1000]
         bucket_obj.delete_objects(Delete={"Objects": [{"Key": obj.key} for obj in batch]})
 
     logger.info(f"Deleted existing content from s3://{bucket}/{prefix}")
 
 
-def extract_from_sap(table: str):
+def extract_from_mysql(table: str):
     """
-    Extracts data from SAP HANA using Glue connector.
+    Extracts data from MySQL using Glue connection.
     """
-    logger.info(f"Reading data from SAP HANA table: {table} ...")
+    logger.info(f"Reading data from MySQL table: {table} ...")
 
-    sap_frame = glue_context.create_dynamic_frame.from_options(
-        connection_type="saphana",
-        connection_options={"connectionName": connection_name, "dbtable": table},
-        transformation_ctx=f"sapNode_{table.replace('.', '_')}"
+    frame = glue_context.create_dynamic_frame.from_options(
+        connection_type="mysql",
+        connection_options={
+            "useConnectionProperties": "true",
+            "dbtable": table,
+            "connectionName": connection_name,
+        },
+        transformation_ctx=f"mysqlNode_{table.replace('.', '_')}"
     )
 
-    record_count = sap_frame.count()
+    record_count = frame.count()
     logger.info(f"Extracted {record_count} records from {table}")
-    return sap_frame
+    return frame
 
 
 def evaluate_data_quality(frame, table: str):
@@ -141,9 +137,9 @@ def evaluate_data_quality(frame, table: str):
 
 def write_to_s3(frame, schema: str, table: str) -> str:
     """
-    Writes the DynamicFrame to S3 in Parquet format, after clearing existing partition.
+    Writes the DynamicFrame to S3 in Parquet format, overwriting existing data (no partitioning).
     """
-    output_prefix = f"{schema}_{table}/year={year}/month={month}/day={day}/"
+    output_prefix = f"{schema}_{table}/"
     output_path = f"s3://{target_bucket}/{output_prefix}"
 
     clear_s3_prefix(target_bucket, output_prefix)
@@ -163,44 +159,25 @@ def write_to_s3(frame, schema: str, table: str) -> str:
     return output_path
 
 
-def trigger_step_function(payload: dict) -> None:
-    """
-    Triggers the configured Step Function with the given payload.
-    """
-    execution_name = f"{job_name}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
-    logger.info(f"Starting Step Function execution: {state_machine_arn} with payload {payload}")
-
-    response = stepfunctions_client.start_execution(
-        stateMachineArn=state_machine_arn,
-        name=execution_name,
-        input=json.dumps(payload)
-    )
-
-    logger.info(f"Step Function started. Execution ARN: {response['executionArn']}")
-
-
 # ============================================================
-# Main ETL Loop
+# Main ETL Process
 # ============================================================
-for table in tables:
-    schema_name, table_name = table.split(".")
+try:
+    schema_name, table_name = db_table.split(".")
 
     # 1. Extract
-    sap_frame = extract_from_sap(table)
+    mysql_frame = extract_from_mysql(db_table)
 
     # 2. Data Quality
-    evaluate_data_quality(sap_frame, table)
+    evaluate_data_quality(mysql_frame, db_table)
 
     # 3. Load
-    write_to_s3(sap_frame, schema_name, table_name)
+    write_to_s3(mysql_frame, schema_name, table_name)
 
-# ============================================================
-# Post-Processing: Trigger Step Function
-# ============================================================
-trigger_step_function(payload={"key": "SBO_CCP.POC_DIARIO"})
+    job.commit()
+    logger.info(f"Glue job {job_name} completed successfully.")
 
-# ============================================================
-# Commit Glue Job
-# ============================================================
-job.commit()
-logger.info(f"Glue job {job_name} completed successfully.")
+except Exception as e:
+    logger.error(f"Glue job {job_name} failed: {str(e)}", exc_info=True)
+    job.commit()
+    raise

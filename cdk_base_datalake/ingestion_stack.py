@@ -1,10 +1,13 @@
 from aws_cdk import (
-    Duration,
-    RemovalPolicy,
     Stack,
+    Duration,
     aws_glue as glue,
     aws_s3 as s3,
     aws_iam as iam,
+    aws_events as events,
+    aws_events_targets as targets,
+    aws_lambda as _lambda,
+
 )
 from constructs import Construct
 
@@ -18,6 +21,7 @@ class IngestionStack(Stack):
             scope: Construct,
             construct_id: str,
             scripts_bucket: s3.Bucket,
+            ingestion_bucket: s3.Bucket,
             raw_bucket: s3.Bucket,
             **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -28,7 +32,9 @@ class IngestionStack(Stack):
                 resources=[
                     raw_bucket.arn_for_objects("*"),
                     scripts_bucket.arn_for_objects("*"),
+                    ingestion_bucket.arn_for_objects("*"),
                     raw_bucket.bucket_arn,
+                    ingestion_bucket.bucket_arn,
                     scripts_bucket.bucket_arn
                 ],
             )
@@ -65,16 +71,6 @@ class IngestionStack(Stack):
             ],
             resources=["*"]
         )
-        
-
-        glue_connection_role = iam.Role(
-            self,
-            create_name(self, "role", "glue-sap-connection"),
-            assumed_by=iam.ServicePrincipal("glue.amazonaws.com"),
-            role_name=create_name(self, "role", "glue-sap-connection"),
-        )
-        glue_connection_role.add_to_policy(secret_read_policy)
-        glue_connection_role.add_to_policy(vpc_networking_policy)
 
 
         glue_role = iam.Role(
@@ -93,6 +89,8 @@ class IngestionStack(Stack):
         glue_role.add_to_policy(step_function_policy)
 
 
+        ############### SCHEDULED EXECUTION  #####################
+
         # Create an aws glue job for python
         glue_job = glue.CfnJob(
             self,
@@ -101,12 +99,12 @@ class IngestionStack(Stack):
             role=glue_role.role_arn,
             command=glue.CfnJob.JobCommandProperty(
                 name="glueetl",
-                script_location=f"s3://{scripts_bucket.bucket_name}/glue/ingestion.py",
+                script_location=f"s3://{scripts_bucket.bucket_name}/glue/ingestion_scheduled.py",
             ),
             default_arguments={
                 "--TARGET_BUCKET": raw_bucket.bucket_name,
-                "--CONNECTION_NAME": "marina-us-east-1-connection-dev-sap-hana",
-                "--SM_STAGE_A_ARN": "arn:aws:states:"+self.region+":"+self.account+":stateMachine:"+create_name(self, "state-machine", "data-stage-a")
+                "--CONNECTION_NAME": "Mysql connection",
+                "--DB_TABLE": "rdsdb.delitos_junin"
             },
             glue_version="5.0",
             max_capacity=1.0,
@@ -116,12 +114,95 @@ class IngestionStack(Stack):
             ),
             connections=glue.CfnJob.ConnectionsListProperty(
                     connections=[
-                        "marina-us-east-1-connection-dev-sap-hana"
+                        "Mysql connection"
                         #create_name(self, "connection", "sap-hana")
                     ]
                 )
-            
         )
+
+        scheduled_rule = glue.CfnTrigger(
+            self,
+            create_name(self, "trigger", "ingestion"),
+            name=create_name(self, "trigger", "ingestion"),
+            type="SCHEDULED",
+            schedule="cron(0 0/1 * * ? *)",
+            start_on_creation=True,
+            actions=[
+                glue.CfnTrigger.ActionProperty(
+                    job_name=glue_job.name,
+                )
+            ],
+        ) 
+
+
+
+
+
+        ############ EVENT DRIVEN EXECUTION  ################
+        
+        glue_job_triggered = glue.CfnJob(
+            self,
+            create_name(self, "job", "ingestion_triggered"),
+            name=create_name(self, "job", "ingestion_triggered"),
+            role=glue_role.role_arn,
+            command=glue.CfnJob.JobCommandProperty(
+                name="glueetl",
+                script_location=f"s3://{scripts_bucket.bucket_name}/glue/ingestion_triggered.py",
+            ),
+            default_arguments={
+                "--TARGET_BUCKET": raw_bucket.bucket_name,
+                "--SOURCE_BUCKET": ingestion_bucket.bucket_name,
+                "--DB_TABLE": "rdsdb.delitos_junin"
+            },
+            glue_version="5.0",
+            max_capacity=1.0,
+            timeout=10,
+            execution_property=glue.CfnJob.ExecutionPropertyProperty(
+                max_concurrent_runs=3
+            )
+        )
+
+
+        # 3. Lambda to start Glue Job
+        lambda_fn = _lambda.Function(self, create_name(self, "lambda", "start-glue-ingestion"),
+            runtime=_lambda.Runtime.PYTHON_3_9,
+            handler="index.handler",
+            timeout=Duration.seconds(120),
+            function_name=create_name(self, "lambda", "start-glue-ingestion"),
+            code=_lambda.Code.from_inline(
+                f"""
+import boto3
+def handler(event, context):
+    client = boto3.client('glue')
+    response = client.start_job_run(JobName='{glue_job_triggered.name}')
+    print("Started Glue Job:", response)
+    return response
+"""
+            )
+        )
+        
+        # Permissions for Lambda to start Glue Job
+        lambda_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=["glue:StartJobRun"],
+            resources=["*"] 
+        ))
+
+        # 4. EventBridge Rule - S3 PutObject
+        rule = events.Rule(self, create_name(self, "rule", "s3-putobject"),
+            rule_name=create_name(self, "rule", "s3-putobject"),
+            event_pattern=events.EventPattern(
+                source=["aws.s3"],
+                detail_type=["Object Created"],
+                resources=[ingestion_bucket.bucket_arn],
+            )
+        )
+
+        # 5. Add Lambda as Target
+        rule.add_target(targets.LambdaFunction(lambda_fn))
+
+
+
+
 
 
 

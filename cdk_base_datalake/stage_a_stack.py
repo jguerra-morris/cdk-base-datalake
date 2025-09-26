@@ -8,7 +8,6 @@ from aws_cdk import (
     aws_events as events,
     aws_events_targets as targets,
     Duration,
-    RemovalPolicy,
     Stack,
     aws_glue as glue,
     aws_s3 as s3,

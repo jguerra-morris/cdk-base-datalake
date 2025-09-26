@@ -33,58 +33,26 @@ class NetworkingStack(Stack):
                 ),
             ],
         )
-        
-
-        # Create a transit gateway attatchment
-        tgw_attachment = ec2.CfnTransitGatewayAttachment(
-            self,
-            create_name(self, "tgw", "attachment"),
-            transit_gateway_id="tgw-0cf1f3933cccd7532",
-            vpc_id=self.vpc.vpc_id,
-            subnet_ids=self.vpc.select_subnets(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-            ).subnet_ids,
-            tags=[{"key": "Name", "value": create_name(self, "tgw", "attachment")}],
-        )
-
-
-        # Select private subnets
-        private_subnets = self.vpc.select_subnets(
-            subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-        ).subnets
-
-
-        # Add a route to each private subnet's route table
-        for i, subnet in enumerate(private_subnets):
-            routes = ec2.CfnRoute(
-                self,
-                f"PrivateSubnetTgwRoute{i}",
-                route_table_id=subnet.route_table.route_table_id,
-                destination_cidr_block="10.100.3.158/32",
-                transit_gateway_id="tgw-0cf1f3933cccd7532",
-            )
-
-            routes.node.add_dependency(tgw_attachment)
-
-
-        # Security Group
-        security_group = ec2.SecurityGroup(
-            self,
-            create_name(self, "sg", "instance-test"),
-            vpc=self.vpc,
-            security_group_name=create_name(self, "sg", "instance-test"),
-            description="Gives access to Instance",
-        )
-        
-        security_group.add_ingress_rule(
-            peer=ec2.Peer.ipv4("10.100.3.158/32"),
-            connection=ec2.Port.all_traffic(),  #5439
-            description="Connection to cluster from anywhere"
-        )
 
 
         instance_test = False
         if instance_test:
+            
+            # Security Group
+            security_group = ec2.SecurityGroup(
+                self,
+                create_name(self, "sg", "instance-test"),
+                vpc=self.vpc,
+                security_group_name=create_name(self, "sg", "instance-test"),
+                description="Gives access to Instance",
+            )
+            
+            security_group.add_ingress_rule(
+                peer=ec2.Peer.ipv4("10.100.3.158/32"),
+                connection=ec2.Port.all_traffic(),  #5439
+                description="Connection to cluster from anywhere"
+            )
+
             # Add a role for an EC2 instance that can be connected through SSM
             role = iam.Role(
                 self,
