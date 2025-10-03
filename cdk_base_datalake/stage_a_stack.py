@@ -1,162 +1,93 @@
-import sys
-import logging
-from datetime import datetime
-
-import boto3
-from awsglue.transforms import *
-from awsglue.utils import getResolvedOptions
-from pyspark.context import SparkContext
-from awsglue.context import GlueContext
-from awsglue.job import Job
-from awsglue.dynamicframe import DynamicFrame
-
-# ============================================================
-# Configure Logging
-# ============================================================
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-logging.basicConfig(
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    level=logging.INFO,
-    datefmt="%Y-%m-%d %H:%M:%S"
+from aws_cdk import (
+    Stack,
+    aws_glue as glue,
+    aws_s3 as s3,
+    aws_iam as iam,
 )
-
-# ============================================================
-# Parse Glue Job Arguments
-# ============================================================
-args = getResolvedOptions(
-    sys.argv,
-    ["JOB_NAME", "SOURCE_BUCKET", "TARGET_BUCKET"]
-)
-
-job_name = args["JOB_NAME"]
-source_bucket = args["SOURCE_BUCKET"]
-target_bucket = args["TARGET_BUCKET"]
-
-logger.info(f"Starting Glue job: {job_name}")
-logger.info(f"Source S3 bucket: {source_bucket}")
-logger.info(f"Target S3 bucket: {target_bucket}")
-
-# ============================================================
-# Initialize Glue Context
-# ============================================================
-sc = SparkContext()
-glue_context = GlueContext(sc)
-spark = glue_context.spark_session
-
-job = Job(glue_context)
-job.init(job_name, args)
-
-s3 = boto3.resource("s3")
-
-# ============================================================
-# Helper Functions
-# ============================================================
-
-def clear_s3_prefix(bucket: str, prefix: str) -> None:
-    """
-    Deletes all objects under the given S3 prefix.
-    """
-    prefix = prefix.rstrip("/")
-    bucket_obj = s3.Bucket(bucket)
-
-    objects_to_delete = list(bucket_obj.objects.filter(Prefix=prefix))
-    if not objects_to_delete:
-        logger.warning(f"No existing objects found under s3://{bucket}/{prefix}")
-        return
-
-    logger.info(f"Deleting {len(objects_to_delete)} objects from s3://{bucket}/{prefix}")
-
-    for i in range(0, len(objects_to_delete), 1000):  # API batch limit
-        batch = objects_to_delete[i:i+1000]
-        bucket_obj.delete_objects(Delete={"Objects": [{"Key": obj.key} for obj in batch]})
-
-    logger.info(f"Cleared s3://{bucket}/{prefix}")
+from constructs import Construct
 
 
-def extract_parquet_from_s3(path: str, ctx_name: str):
-    """
-    Reads Parquet data from the given S3 path into a DynamicFrame.
-    """
-    logger.info(f"Reading Parquet data from {path}")
+from utils import create_name
 
-    frame = glue_context.create_dynamic_frame.from_options(
-        connection_type="s3",
-        format="parquet",
-        connection_options={"paths": [path], "recurse": True},
-        transformation_ctx=ctx_name
-    )
+class StageAStack(Stack):
 
-    count = frame.count()
-    logger.info(f"Extracted {count} records from {path}")
-    return frame
+    def __init__(
+            self,
+            scope: Construct,
+            construct_id: str,
+            scripts_bucket: s3.Bucket,
+            raw_bucket: s3.Bucket,
+            master_bucket: s3.Bucket,
+            **kwargs) -> None:
+        super().__init__(scope, construct_id, **kwargs)
+        
+
+        s3_read_write_policy = iam.PolicyStatement(
+                actions=["s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:ListBucket"],
+                resources=[
+                    raw_bucket.arn_for_objects("*"),
+                    scripts_bucket.arn_for_objects("*"),
+                    master_bucket.arn_for_objects("*"),
+                    master_bucket.bucket_arn,
+                    raw_bucket.bucket_arn,
+                    scripts_bucket.bucket_arn
+                ],
+            )
+        secret_read_policy = iam.PolicyStatement(
+            sid="AllowSecretRead",
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret"
+            ],
+            resources=[
+                "arn:aws:secretsmanager:"+self.region+":"+self.account+":secret:*"
+            ]
+        )
+        step_function_policy = iam.PolicyStatement(
+            sid="AllowSFAllow",
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "states:StartExecution"
+            ],
+            resources=["*"]
+        )
+        
+
+        glue_role = iam.Role(
+            self,
+            create_name(self, "role", "stage-a-glue"),
+            assumed_by=iam.ServicePrincipal("glue.amazonaws.com"),
+            role_name=create_name(self, "role", "stage-a-glue"),
+        )
+        glue_role.add_managed_policy(
+            iam.ManagedPolicy.from_aws_managed_policy_name(
+                "service-role/AWSGlueServiceRole"
+            )
+        )
+        glue_role.add_to_policy(secret_read_policy)
+        glue_role.add_to_policy(s3_read_write_policy)
+        glue_role.add_to_policy(step_function_policy)
 
 
-def union_dynamicframes(frames: list, ctx_name: str) -> DynamicFrame:
-    """
-    Unions multiple DynamicFrames safely using Spark unionByName.
-    """
-    logger.info("Combining multiple datasets into one DynamicFrame...")
-
-    dfs = [f.toDF() for f in frames]
-    combined_df = dfs[0]
-
-    for df in dfs[1:]:
-        combined_df = combined_df.unionByName(df, allowMissingColumns=True)
-
-    combined_frame = DynamicFrame.fromDF(combined_df, glue_context, ctx_name)
-    logger.info(f"Combined dataset contains {combined_frame.count()} records")
-    return combined_frame
-
-
-def write_to_s3(frame: DynamicFrame, prefix: str) -> str:
-    """
-    Writes a DynamicFrame to S3 in Parquet format (overwrite mode).
-    """
-    output_prefix = prefix.rstrip("/") + "/"
-    output_path = f"s3://{target_bucket}/{output_prefix}"
-
-    clear_s3_prefix(target_bucket, output_prefix)
-
-    logger.info(f"Writing dataset to {output_path}")
-
-    glue_context.write_dynamic_frame.from_options(
-        frame=frame,
-        connection_type="s3",
-        format="glueparquet",  # better compatibility with Athena
-        connection_options={"path": output_path, "partitionKeys": []},
-        format_options={"compression": "snappy"},
-        transformation_ctx="s3ParquetSink"
-    )
-
-    logger.info(f"Successfully written data to {output_path}")
-    return output_path
-
-
-# ============================================================
-# Main ETL Process
-# ============================================================
-try:
-    # 1. Extract
-    arequipa_path = f"s3://{source_bucket}/delitos_arequipa/"
-    junin_path = f"s3://{source_bucket}/rdsdb_delitos_junin/"
-
-    delitos_arequipa = extract_parquet_from_s3(arequipa_path, "delitos_arequipa_dyf")
-    delitos_junin = extract_parquet_from_s3(junin_path, "delitos_junin_dyf")
-
-    # 2. Transform (Union)
-    combined_delitos = union_dynamicframes(
-        [delitos_arequipa, delitos_junin],
-        ctx_name="combined_delitos_dyf"
-    )
-
-    # 3. Load
-    write_to_s3(combined_delitos, prefix="delitos_all")
-
-    job.commit()
-    logger.info(f"Glue job {job_name} completed successfully.")
-
-except Exception as e:
-    logger.error(f"Glue job {job_name} failed: {str(e)}", exc_info=True)
-    job.commit()
-    raise
+        # Create an aws glue job for python
+        glue_job = glue.CfnJob(
+            self,
+            create_name(self, "job", "stage-a"),
+            name=create_name(self, "job", "stage-a"),
+            role=glue_role.role_arn,
+            command=glue.CfnJob.JobCommandProperty(
+                name="glueetl",
+                script_location=f"s3://{scripts_bucket.bucket_name}/glue/stage_a.py",
+            ),
+            default_arguments={
+                "--SOURCE_BUCKET": raw_bucket.bucket_name,
+                "--TARGET_BUCKET": master_bucket.bucket_name,
+            },
+            glue_version="5.0",
+            max_capacity=1.0,
+            timeout=10,
+            execution_property=glue.CfnJob.ExecutionPropertyProperty(
+                max_concurrent_runs=3
+            )
+        )
