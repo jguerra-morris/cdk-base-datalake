@@ -1,0 +1,174 @@
+from aws_cdk import (
+    Stack,
+    Duration,
+    RemovalPolicy,
+    aws_stepfunctions as sfn,
+    aws_stepfunctions_tasks as tasks,
+    aws_sns as sns,
+    aws_events as events,
+    aws_events_targets as targets,
+    Duration,
+    RemovalPolicy,
+    Stack,
+    aws_glue as glue,
+    aws_s3 as s3,
+    aws_s3_deployment as s3deploy,
+    aws_iam as iam,
+)
+from constructs import Construct
+
+
+from utils import create_name
+
+class StageAStack(Stack):
+
+    def __init__(
+            self,
+            scope: Construct,
+            construct_id: str,
+            scripts_bucket: s3.Bucket,
+            raw_bucket: s3.Bucket,
+            master_bucket: s3.Bucket,
+            **kwargs) -> None:
+        super().__init__(scope, construct_id, **kwargs)
+        
+
+        s3_read_write_policy = iam.PolicyStatement(
+                actions=["s3:PutObject", "s3:GetObject"],
+                resources=[
+                    raw_bucket.arn_for_objects("*"),
+                    scripts_bucket.arn_for_objects("*"),
+                    master_bucket.arn_for_objects("*"),
+                    raw_bucket.bucket_arn,
+                    scripts_bucket.bucket_arn,
+                    master_bucket.bucket_arn
+                ],
+            )
+        secret_read_policy = iam.PolicyStatement(
+            sid="AllowSecretRead",
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret"
+            ],
+            resources=[
+                "arn:aws:secretsmanager:"+self.region+":"+self.account+":secret:*"
+            ]
+        )
+        sf_execution_policy = iam.PolicyStatement(
+            sid="AllowSFExecution",
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "states:StartExecution"
+            ],
+            resources=[
+                "arn:aws:states:"+self.region+":"+self.account+":stateMachine:*"
+            ]
+        )
+        
+        
+        glue_role = iam.Role(
+            self,
+            create_name(self, "role", "glue"),
+            assumed_by=iam.ServicePrincipal("glue.amazonaws.com"),
+            role_name=create_name(self, "role", "stage-a-role"),
+        )
+        glue_role.add_managed_policy(
+            iam.ManagedPolicy.from_aws_managed_policy_name(
+                "service-role/AWSGlueServiceRole"
+            )
+        )
+        glue_role.add_to_policy(secret_read_policy)
+        glue_role.add_to_policy(s3_read_write_policy)
+        glue_role.add_to_policy(sf_execution_policy)
+
+
+
+        # Deploy glue scripts to s3 bucket
+        s3deploy.BucketDeployment(
+            self,
+            create_name(self, "deploy", "glue-scripts"),
+            sources=[s3deploy.Source.asset("./glue")],
+            destination_bucket=scripts_bucket,
+            destination_key_prefix="glue",
+        )
+
+        # Create an aws glue job for python
+        glue_job = glue.CfnJob(
+            self,
+            create_name(self, "job", "stage-a"),
+            name=create_name(self, "job", "stage-a"),
+            role=glue_role.role_arn,
+            command=glue.CfnJob.JobCommandProperty(
+                name="glueetl",
+                script_location=f"s3://{scripts_bucket.bucket_name}/glue/stage_a.py",
+            ),
+            default_arguments={
+                "--additional-python-modules": "openpyxl==3.1.5",
+                "--SOURCE_BUCKET": raw_bucket.bucket_name,
+                "--TARGET_BUCKET": master_bucket.bucket_name,
+                "--CATALOG_NAME": create_name(self, "glue", f"database-{self.account}"),
+                "--TABLE_NAME": "dl_banmedica71829",
+                "--SM_STAGE_B_ARN": "arn:aws:states:"+self.region+":"+self.account+":stateMachine:"+create_name(self, "state-machine", "data-stage-b")
+            },
+            glue_version="4.0",
+            max_capacity=1.0,
+            execution_property=glue.CfnJob.ExecutionPropertyProperty(
+                max_concurrent_runs=1
+            ),
+        )
+
+        glue_task = tasks.GlueStartJobRun(
+            self,
+            create_name(self, "task", "stage-a"),
+            glue_job_name=glue_job.name,
+            integration_pattern=sfn.IntegrationPattern.RUN_JOB,
+            arguments=sfn.TaskInput.from_object({
+                "--KEY.$": "$.detail.object.key"
+            }),
+            output_path="$",
+            input_path="$",
+            result_path="$",
+        )
+
+        topic = sns.Topic(
+            self,
+            create_name(self, "topic", "stage-a"),
+            display_name="Topico de notificacion de funcionalidad del Stage A.",
+            topic_name=create_name(self, "topic", "stage-a"),
+        )
+
+        job_failed_task = tasks.SnsPublish(
+            self,
+            create_name(self, "task", "job-failed"),
+            topic=topic,
+            message=sfn.TaskInput.from_object({
+                "Error": "Job failed",
+                "Cause": sfn.JsonPath.string_at("$.error"),
+            }),
+            result_path="$.error",
+            subject="Failed Pipeline",
+        )
+
+        step_function_definition = glue_task.add_catch(
+            job_failed_task,
+            result_path="$.error",
+        )
+
+
+        sf_machine = sfn.StateMachine(
+            self,
+            create_name(self, "state-machine", "data-stage-a"),
+            state_machine_name=create_name(self, "state-machine", "data-stage-a"),
+            definition_body=sfn.DefinitionBody.from_chainable(step_function_definition),
+            timeout=Duration.minutes(10),
+        )
+
+
+
+
+
+
+
+
+
